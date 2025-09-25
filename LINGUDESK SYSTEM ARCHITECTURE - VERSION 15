@@ -1,0 +1,234 @@
+LINGUDESK SYSTEM ARCHITECTURE - VERSION 15
+
+================================================================================
+SYSTEM OVERVIEW
+================================================================================
+
+Lingudesk is a distributed language learning platform consisting of 7 physical servers. The goal of this system arrangement is to separate the admin/production part from the user part. This separation makes it possible to apply the defined and restricted rules over the admin side and keep them safe. For the users side that needs different type of protection, using the cookies with SameSite=Lax and other related limitations, provides a complete secure system.
+
+================================================================================
+SYSTEM DESCRIPTION
+================================================================================
+
+1. NETWORK ARCHITECTURE
+   - The system has two networks that are connected together just through the backend:
+     * The edge-net including Frontend and Backend
+     * The core-net including Backend, AI, DB, Auth, Credit and Log servers
+
+2. INTERNET CONNECTIVITY
+   - The connecting servers to the internet are the Frontend server with the domain lingudesk.com and AI that connects to the external APIs of AI models
+
+3. SYSTEM ISOLATION
+   - The log system and admin system of Frontend servers is separated from the core-net and are independent
+
+4. CLIENT ARCHITECTURE
+   - The browser sees only the Frontend server as lingudesk.com
+   - Frontend serves the SPA, while Backend handles API calls and manages HttpOnly cookies with SameSite=Lax
+
+5. AUTHENTICATION
+   - Auth server in core-net handles JWT generation, refresh token validation, and user authentication
+
+6. AI SERVICES
+   - The AI server has restricted access to the model APIs on the outside like OpenAI, Runpod, Claude, etc.
+
+7. DATABASE
+   - The DB server is the centralized database for all servers in core-net with PostgreSQL, MinIO and Redis
+
+8. CREDIT MANAGEMENT
+   - The credit server manages user credits and subscription tiers, receiving Paddle webhooks
+
+9. DESIGN PRINCIPLES
+   - Stateless design must be considered especially for servers Backend, Auth and DB
+
+COMMUNICATION METHODS:
+
+1. Mutual TLS (mTLS) and TLS Termination:
+   - In development phase: simple HTTP between servers and HTTPS just for frontend
+   - In production phase: Tailscale between servers
+
+2. Tokens:
+   - JWT token validation in backend, AI and credit servers
+   - user_id extraction from JWT token to define the user type and access
+   - DB does not validate JWTs directly but enforces access restrictions using Row-Level Security (RLS) based on values set by the services
+
+================================================================================
+PHYSICAL SERVER INFRASTRUCTURE
+================================================================================
+
+--------------------------------------------------------------------------------
+SERVER 1: FRONTEND SERVER
+--------------------------------------------------------------------------------
+- External IP: 91.99.52.132
+- Internal IP in edge-net: 10.1.0.3
+- Purpose: Frontend application hosting
+- Technology: Svelte SPA
+
+--------------------------------------------------------------------------------
+SERVER 2: BACKEND SERVER
+--------------------------------------------------------------------------------
+- Internal IP in edge-net: 10.1.0.2
+- Internal IP in core-net: 10.0.0.2
+- Technology: FastAPI with dual network interfaces
+- Purpose: API gateway between edge-net and core-net services
+
+AUTHENTICATION:
+- Validates JWT access tokens from Authorization header
+
+REFRESH TOKEN HANDLING:
+- Issues an HttpOnly, Secure cookie containing only an opaque identifier (not the raw refresh token)
+- On refresh requests, it reads the identifier from the cookie
+- Queries the Auth service/database to validate and retrieve the corresponding encrypted, device-bound refresh token
+- If valid, issues a new access token and, if needed, rotates the refresh token
+
+RATE LIMITING:
+Authenticated endpoints:
+- Standard endpoints: 50 requests per minute per user_id (from JWT)
+- AI endpoints: 10 requests per minute per user_id
+
+Unauthenticated endpoints (login, signup, refresh, OAuth callbacks, Paddle webhooks):
+- 20 requests per minute per IP address
+- Additional exponential backoff for failed login attempts
+
+Enforcement:
+- Counters stored in Redis with short TTLs
+- Violations return HTTP 429 with a Retry-After header
+
+COMMUNICATIONS:
+- Creating access for frontend to other internal servers
+- Creating access for Paddle webhook to credit server
+
+CREDIT MANAGEMENT:
+The frontend server has requests for database and artificial intelligence service provider servers. These requests are first sent to the backend server. The backend server first reads the user type (free, plus, premium) and credit amount from the credit server. Then it determines the approximate service price along with the required user type for it. Then it checks whether this type of user can use this service or has sufficient balance and decides based on the routing table that the request to which exact endpoint should be sent. If the request is approved, the request is sent to the service provider server and its response is returned to the backend. The backend delivers the request to the frontend. Only in case of correct delivery the backend server sends the deduction amount request to the credit server. The backend server calculates the cost from the response received from the service provider server, in the form of tokens or number of products and using the unit price in its service cost table, and sends it to the credit server.
+
+MICRO-TRANSACTION AGGREGATION:
+For each user_id, a credit account is maintained. Micro-transactions (amounts smaller than €0.01) are first accumulated in memory/cache. As long as the total remains below €0.01, they are not stored as individual records in the database. Once the aggregated sum reaches or exceeds €0.01, a single consolidated record is written to the database. This mechanism reduces storage volume and avoids persisting vast numbers of extremely small transactions.
+
+DURABILITY:
+To ensure reliability, a durability mechanism is applied: the in-memory/cache balances are flushed to the database at regular intervals and/or during server shutdown. This prevents the loss of accumulated micro-transactions in case of crashes or restarts.
+
+--------------------------------------------------------------------------------
+SERVER 3: AUTH SERVER
+--------------------------------------------------------------------------------
+- Internal IP in core-net: 10.0.0.3
+- Purpose: Centralized authentication and JWT management
+
+USER_ID:
+Each user gets a 10 character user_id at sign up that is made from just characters and numbers. The 10-character user ID is short yet unique. For readability, use an unambiguous alphabet (e.g., Base32 Crockford without 0/O and I/l). IDs must be generated with a cryptographically secure random generator (CSPRNG) to minimize collisions.
+
+ACCESS TOKENS:
+- Algorithm: RS256 with rotating key pairs
+- Access token claims: user_id, email, name, role, exp, iat, jti
+- Optional device fingerprint hash (fph) for session binding
+- Public key endpoint: GET /auth/public-key (internal only)
+- Access token lifetime: 15-30 minutes (configurable)
+- Previous signing keys are retained for a grace period equal to token lifetime + buffer 20%
+
+REFRESH TOKENS:
+- Generates and manages the actual refresh tokens
+- Each refresh token is encrypted, device-bound, and stored in the database
+- Associates every refresh token with an opaque identifier returned to the Backend
+- Validates refresh tokens upon lookup and enforces revocation, expiration, and rotation policies
+- Refresh token lifetime: 1 week (configurable)
+- Previous encryption/signing keys are retained for at least the full refresh token lifetime to avoid invalidating existing tokens
+
+AUTHENTICATION METHODS:
+- Email/password with bcrypt hashing
+- OAuth2: Google/Apple (callbacks via Backend)
+- Password reset with time-limited tokens
+
+SECURITY FEATURES:
+- 2FA: Email OTP (mandatory for admin, optional for users)
+- Account lockout after 5 failed attempts
+- Rate limiting per IP and user
+- Audit logging for all auth events
+
+--------------------------------------------------------------------------------
+SERVER 4: DB SERVER
+--------------------------------------------------------------------------------
+- Internal IP in core-net: 10.0.0.5
+- Purpose: Centralized data storage and file management
+
+TECHNOLOGIES:
+- PostgreSQL: Relational data
+- MinIO: Object storage for media files
+
+SECURITY:
+- Row-level security by user_id
+- Encrypted sensitive fields
+- User can only access own data (except admin)
+
+--------------------------------------------------------------------------------
+SERVER 5: AI SERVER
+--------------------------------------------------------------------------------
+- External IP: 188.245.107.89
+- Internal IP in core-net: 10.0.0.6
+- Purpose: AI services (ChatGPT, Claude, Deepseek, Flux Schnell, Chatterbox-TTS)
+- Features: Caching, Queueing, Model integration
+
+ARCHITECTURE:
+- A general base including docker, main.py, MinIO
+- A python file for each AI server as its plugin with its own cache, python queue and rate limit
+- All settings in .env file
+
+PLUGIN STRUCTURE:
+- For each plugin there is a context file in JSON format including the parameter name and its context text (e.g., plugin_chatgpt.py, context_chatgpt.json)
+- For each plugin there is one endpoint to access it from the backend
+- Caching capability with MinIO for files and PostgreSQL for text are permanent in the db server
+- Cache is only updated when the frontend requests that the data has to be from the model
+- Specification that data is generated from cache or from model in response
+
+ERROR HANDLING:
+- Simple error management
+- In case of no model response or problem, report error type in response
+
+STORAGE CONFIGURATION:
+- MinIO username and password and parameters in .env file
+- MinIO: one Bucket for each model plugin with the model's name for its cache in db server
+- PostgreSQL username and password and parameters in .env file
+- One table in the db server for each model plugin with the model's own name for its cache
+
+--------------------------------------------------------------------------------
+SERVER 6: CREDIT SERVER
+--------------------------------------------------------------------------------
+- Internal IP in Core-net: 10.0.0.4
+- Purpose: Handle user transactions and credit management
+
+FUNCTIONALITY:
+- Handles user transactions independent of value (plus or minus)
+- Gathers all transactions and prepares fast reports, detailed reports, and user search capabilities
+- Holds purchase and payment history
+- Admin endpoints for admin panel in the frontend
+- User endpoints providing purchase history
+- Paddle webhook support through backend server
+- Supports three user types: free, plus, premium
+
+--------------------------------------------------------------------------------
+SERVER 7: LOG SERVER
+--------------------------------------------------------------------------------
+- Internal IP in Core-net: 10.0.0.7
+- Purpose: Centralized log aggregation and monitoring server with hybrid architecture
+
+ARCHITECTURE:
+Host-Level Components (Native Installation):
+- Node Exporter (port 9100)
+- Fluent Bit agent (for local logs)
+- Docker Engine
+
+Docker Containers:
+- Prometheus container (port 9090)
+- Grafana container (port 3000)
+- Loki container (port 3100)
+- AlertManager container (port 9093)
+
+OTHER SERVERS (1-6) HOST-LEVEL COMPONENTS:
+- Node Exporter (port 9100)
+- Fluent Bit agent (forwards to 10.0.0.7:3100)
+- cAdvisor container (port 8080) for Docker metrics
+
+STORAGE:
+- Persistent volumes for Prometheus and Loki data on host filesystem
+
+SECURITY:
+- Two-factor authentication and default Grafana authentication
+
+================================================================================
