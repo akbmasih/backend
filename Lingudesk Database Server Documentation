@@ -1,0 +1,166 @@
+# Lingudesk Database Server Documentation
+## Central Database for Microservices Architecture
+
+### Overview
+یک بانک داده مرکزی برای سیستم Lingudesk که تمام میکروسرویس‌ها به آن متصل می‌شوند. این بانک داده با معماری Schema-per-Service طراحی شده تا هر سرویس schema مخصوص خود را داشته باشد ولی به داده‌های مشترک نیز دسترسی داشته باشد.
+
+### Infrastructure
+- **Server IP**: `10.0.0.5` (internal network)
+- **PostgreSQL**: Port `5432` - Main relational database
+- **PgBouncer**: Port `6432` - Connection pooling (optional)
+- **Redis**: Port `6379` - Caching & rate limiting
+- **MinIO**: Port `9000` (API), `9001` (Console) - Object storage
+
+### Database Structure
+
+#### Schemas
+```
+├── public      # Shared data (users, routing, products)
+├── auth        # Authentication (credentials, tokens, OAuth)
+├── credit      # Credits & subscriptions
+├── ai          # AI cache & usage logs  
+├── content     # Decks, cards, learning data
+└── audit       # System-wide audit logs
+```
+
+### Connection Details
+
+#### PostgreSQL
+```
+Host: 10.0.0.5
+Port: 5432
+Database: lingudesk
+User: db_user
+Password: [از فایل .env]
+SSL: recommended
+```
+
+#### Redis (4 databases)
+```
+Host: 10.0.0.5
+Port: 6379
+Password: [از فایل .env]
+DB 0: Rate limiting (TTL: 1 minute)
+DB 1: Session data (TTL: variable)
+DB 2: Micro-transactions (persistent with AOF)
+DB 3: API cache (TTL: variable)
+```
+
+#### MinIO Buckets
+```
+lingudesk-media      # User uploads (images, audio)
+lingudesk-ai-cache   # AI generated content
+lingudesk-backups    # System backups
+```
+
+### Service-Specific Information
+
+#### Auth Server (10.0.0.3)
+**Tables**: `auth.*`, `public.users`
+- User authentication با bcrypt
+- JWT refresh tokens در `auth.refresh_tokens`
+- OAuth accounts در `auth.oauth_accounts`
+- 2FA settings و email verification
+- User ID: 10 کاراکتر Base32 Crockford
+
+#### AI Server (10.0.0.6)
+**Tables**: `ai.*`
+- Cache در `ai.cache_entries` با SHA256 key
+- Usage logs در `ai.usage_logs`
+- Plugin configs در `ai.plugin_configs`
+- MinIO برای ذخیره فایل‌های تولیدی
+
+#### Credit Server (10.0.0.4)
+**Tables**: `credit.*`
+- User balances در `credit.balances`
+- Transactions در `credit.transactions`
+- Subscriptions (free/plus/premium)
+- Pricing rules per service & account type
+- Micro-transaction aggregation (< €0.01)
+
+#### Backend Server (10.0.0.2)
+**Tables**: `public.routing_rules`, `public.service_costs`
+- Routing table برای endpoint mapping
+- Service cost calculation
+- Content management (decks/cards در `content.*`)
+- Rate limiting via Redis DB 0
+
+### Key Features
+
+#### Security
+- Row-Level Security (RLS) enabled
+- User isolation by `user_id`
+- Encrypted sensitive fields
+- Session variable: `app.current_user_id`
+
+#### Performance
+- Connection pooling via PgBouncer
+- Redis caching layers
+- Partitioned audit logs
+- Auto-vacuum configured
+
+#### FSRS Algorithm
+کارت‌های یادگیری با الگوریتم FSRS:
+- States: New, Learning, Review, Relearning
+- Fields: stability, difficulty, reps, lapses
+- 5 preset learning configurations
+
+#### Available Languages
+30 زبان پیش‌تعریف در `content.languages` با RTL/LTR support
+
+### Important Tables
+
+#### public.users
+```sql
+user_id (VARCHAR 10) - Primary key
+email, full_name
+role (user/admin)
+account_type (free/plus/premium)
+status (active/suspended/deleted/pending)
+```
+
+#### credit.transactions
+```sql
+user_id, amount, balance_after
+type (usage/purchase/refund/adjustment)
+service_name, description
+reference_id (Paddle order ID)
+```
+
+#### ai.cache_entries
+```sql
+cache_key (SHA256 hash)
+plugin_name, request_data, response_data
+tokens_used, processing_time_ms
+expires_at, accessed_count
+```
+
+### Triggers & Functions
+- `update_updated_at()` - Auto timestamp updates
+- `update_deck_card_count()` - Card counting
+- `update_user_balance()` - Balance after transaction
+- `cleanup_expired_data()` - Daily cleanup job
+
+### Backup & Recovery
+- Daily automated backups to MinIO
+- WAL archiving enabled
+- Point-in-time recovery supported
+- Encrypted backups with GPG
+
+### Connection Tips
+1. استفاده از connection pooling برای production
+2. Set `app.current_user_id` برای RLS
+3. Redis برای rate limiting ضروری است
+4. MinIO credentials برای media upload نیاز است
+5. همیشه از prepared statements استفاده کنید
+
+### Environment Variables Required
+```env
+POSTGRES_PASSWORD
+REDIS_PASSWORD
+MINIO_ROOT_USER
+MINIO_ROOT_PASSWORD
+```
+
+---
+**Note**: این database با در نظر گرفتن stateless design و horizontal scaling طراحی شده. هر سرویس فقط به schema خودش write می‌کند ولی می‌تواند از public schema بخواند.
