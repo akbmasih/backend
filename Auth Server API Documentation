@@ -1,0 +1,504 @@
+Auth Server API Documentation
+Path: /docs/auth_api_endpoints.md
+Purpose: Complete API documentation for Backend server integration
+Server Configuration
+Internal URL: http://10.0.0.3:8000
+Network: core-net (Docker internal network)
+Database: Central DB at 10.0.0.5:5432/lingudesk
+Authentication: All endpoints require X-API-Key header
+Global Headers
+X-API-Key: {INTERNAL_API_KEY}  # Must match auth server configuration
+Content-Type: application/json
+
+
+1. Health Check
+GET /health
+Purpose: Check auth server status and database connectivity
+Request:
+GET http://10.0.0.3:8000/health
+
+Response (200 OK):
+{
+  "status": "healthy",  // or "degraded"
+  "database": "healthy", // or "unhealthy"
+  "timestamp": "2024-01-15T10:30:00Z"
+}
+
+
+2. User Registration
+POST /auth/register
+Purpose: Register new user in central database
+Headers:
+X-API-Key: {INTERNAL_API_KEY}
+Content-Type: application/json
+
+Request Body:
+{
+  "email": "user@example.com",
+  "password": "SecurePassword123!",  // Min 12 chars
+  "full_name": "John Doe"  // Optional
+}
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Registration successful",
+  "data": {
+    "user_id": "A3B4C5D6E7",  // 10-char unique ID
+    "email": "user@example.com"
+  }
+}
+
+Error Responses:
+409 Conflict: Email already registered
+400 Bad Request: Invalid input data
+403 Forbidden: Registration disabled
+
+3. User Login
+POST /auth/login
+Purpose: Authenticate user and get tokens
+Headers:
+X-API-Key: {INTERNAL_API_KEY}
+Content-Type: application/json
+User-Agent: {client_user_agent}  // Pass from client
+
+Request Body:
+{
+  "email": "user@example.com",
+  "password": "SecurePassword123!",
+  "device_fingerprint": "optional_device_id"  // Optional
+}
+
+Response - Normal Login (200 OK):
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "refresh_identifier": "dGhpc0lzQVJlZnJlc2hJZGVudGlmaWVy...",
+  "token_type": "Bearer",
+  "expires_in": 900  // 15 minutes in seconds
+}
+
+Response - 2FA Required (202 Accepted):
+{
+  "requires_2fa": true,
+  "session_id": "secure_session_id_32_chars",
+  "expires_in": 300  // 5 minutes
+}
+
+Error Responses:
+401 Unauthorized: Invalid credentials
+423 Locked: Account locked (too many failed attempts)
+403 Forbidden: Account suspended/deleted
+Implementation Notes:
+Store refresh_identifier in httpOnly cookie
+Store actual refresh token securely in backend
+Pass client IP via request headers
+
+4. Two-Factor Authentication
+POST /auth/2fa/verify
+Purpose: Verify 2FA code after login
+Request Body:
+{
+  "session_id": "secure_session_id_from_login",
+  "code": "123456"  // 6-digit code
+}
+
+Response (200 OK):
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "refresh_identifier": "dGhpc0lzQVJlZnJlc2hJZGVudGlmaWVy...",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+
+Error Responses:
+401 Unauthorized: Invalid code or expired session
+
+5. Token Refresh
+POST /auth/refresh
+Purpose: Get new access token using refresh token
+Request Body:
+{
+  "identifier": "refresh_identifier_from_cookie",
+  "token": "actual_refresh_token_from_backend_storage"
+}
+
+Response (200 OK):
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+
+Error Responses:
+401 Unauthorized: Invalid or expired refresh token
+
+6. Logout
+POST /auth/logout
+Purpose: Revoke all user refresh tokens
+Headers:
+X-API-Key: {INTERNAL_API_KEY}
+Authorization: Bearer {access_token}
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Logged out successfully"
+}
+
+
+7. Email Verification
+POST /auth/verify-email
+Purpose: Verify email with 6-digit code
+Request Body:
+{
+  "email": "user@example.com",
+  "code": "123456"
+}
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Email verified successfully"
+}
+
+
+8. Password Reset
+POST /auth/forgot-password
+Purpose: Initiate password reset process
+Request:
+POST http://10.0.0.3:8000/auth/forgot-password?email=user@example.com
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "If the email exists, a reset link has been sent"
+}
+
+POST /auth/reset-password
+Purpose: Reset password with token
+Request Body:
+{
+  "token": "reset_token_from_email",
+  "new_password": "NewSecurePassword123!"
+}
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Password reset successfully"
+}
+
+
+9. Token Validation
+GET /auth/validate-token
+Purpose: Validate access token and get user info
+Headers:
+X-API-Key: {INTERNAL_API_KEY}
+Authorization: Bearer {access_token}
+
+Response (200 OK):
+{
+  "valid": true,
+  "user": {
+    "user_id": "A3B4C5D6E7",
+    "email": "user@example.com",
+    "name": "John Doe",
+    "role": "user",  // or "admin"
+    "account_type": "free",  // or "plus", "premium"
+    "jti": "unique_token_id"
+  }
+}
+
+
+10. Get User by ID
+GET /auth/user/{user_id}
+Purpose: Get user information (internal use)
+Headers:
+X-API-Key: {INTERNAL_API_KEY}
+
+Response (200 OK):
+{
+  "user_id": "A3B4C5D6E7",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "user",
+  "account_type": "free",
+  "status": "active"
+}
+
+
+11. RSA Public Keys
+GET /auth/public-key
+Purpose: Get public keys for JWT verification
+Headers:
+X-API-Key: {INTERNAL_API_KEY}
+
+Response (200 OK):
+{
+  "keys": [
+    {
+      "public_key": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg...",
+      "key_id": "key_identifier",
+      "is_current": true
+    }
+  ],
+  "algorithm": "RS256"
+}
+
+
+Admin Endpoints
+Prerequisites
+All admin endpoints require:
+X-API-Key header
+Authorization: Bearer {admin_access_token} header
+User must have role: "admin"
+GET /admin/users
+Purpose: List all users with pagination
+Query Parameters:
+page: Page number (default: 1)
+limit: Items per page (default: 20, max: 100)
+search: Search in email/name
+role: Filter by role (user/admin)
+account_type: Filter by account type
+status: Filter by status (active/suspended/deleted)
+Response (200 OK):
+{
+  "users": [
+    {
+      "user_id": "A3B4C5D6E7",
+      "email": "user@example.com",
+      "full_name": "John Doe",
+      "role": "user",
+      "account_type": "free",
+      "status": "active",
+      "email_verified": true,
+      "last_login_at": "2024-01-15T10:30:00Z",
+      "created_at": "2024-01-01T00:00:00Z"
+    }
+  ],
+  "total": 150,
+  "page": 1,
+  "limit": 20
+}
+
+GET /admin/users/{user_id}
+Purpose: Get detailed user information
+PUT /admin/users/{user_id}
+Purpose: Update user information
+Request Body:
+{
+  "email": "newemail@example.com",
+  "full_name": "Updated Name",
+  "role": "admin",
+  "account_type": "premium",
+  "status": "active"
+}
+
+POST /admin/users/{user_id}/suspend
+Purpose: Suspend user account
+Query Parameters:
+reason: Suspension reason (min 10 chars)
+POST /admin/users/{user_id}/activate
+Purpose: Activate suspended account
+POST /admin/users/{user_id}/reset-password
+Purpose: Send password reset email to user
+GET /admin/sessions
+Purpose: Get all active sessions
+Query Parameters:
+user_id: Filter by user (optional)
+limit: Max results (default: 100, max: 500)
+DELETE /admin/sessions/{token_identifier}
+Purpose: Revoke specific session
+GET /admin/stats/overview
+Purpose: Get system statistics
+Response:
+{
+  "total_users": 1500,
+  "active_users": 1200,
+  "suspended_users": 50,
+  "new_users_today": 15,
+  "new_users_this_week": 85,
+  "account_types": {
+    "free": 1000,
+    "plus": 300,
+    "premium": 200
+  }
+}
+
+GET /admin/audit-logs
+Purpose: Get audit logs
+Query Parameters:
+user_id: Filter by user
+action: Filter by action type
+limit: Max results (default: 100)
+offset: Pagination offset
+
+JWT Token Structure
+Access Token Payload
+{
+  "sub": "A3B4C5D6E7",  // user_id
+  "email": "user@example.com",
+  "name": "John Doe",
+  "role": "user",
+  "account_type": "free",
+  "exp": 1234567890,  // Expiry timestamp
+  "iat": 1234567800,  // Issued at
+  "nbf": 1234567800,  // Not before
+  "jti": "unique_token_id",
+  "kid": "key_id",
+  "type": "access"
+}
+
+
+Error Response Format
+All errors follow this structure:
+{
+  "detail": "Error message description"
+}
+
+Common HTTP status codes:
+200: Success
+202: Accepted (2FA required)
+400: Bad Request
+401: Unauthorized
+403: Forbidden
+404: Not Found
+409: Conflict
+423: Locked
+500: Internal Server Error
+
+Backend Integration Guidelines
+1. Token Management
+# Store refresh tokens securely
+refresh_storage = {
+    "identifier": "from_auth_response",
+    "token": "actual_token_from_auth",
+    "user_id": "A3B4C5D6E7",
+    "expires_at": "timestamp"
+}
+
+# Set identifier in httpOnly cookie
+set_cookie("refresh_id", identifier, httpOnly=True, secure=True)
+
+2. Request Forwarding
+# Forward client info to auth server
+auth_headers = {
+    "X-API-Key": INTERNAL_API_KEY,
+    "X-Real-IP": request.client.host,
+    "X-Forwarded-For": request.headers.get("X-Forwarded-For"),
+    "User-Agent": request.headers.get("User-Agent")
+}
+
+3. JWT Verification
+# Cache public keys and refresh periodically
+public_keys = await fetch_public_keys()  # GET /auth/public-key
+
+# Verify token with cached keys
+def verify_jwt(token):
+    for key in public_keys:
+        try:
+            payload = jwt.decode(
+                token,
+                key["public_key"],
+                algorithms=["RS256"]
+            )
+            return payload
+        except:
+            continue
+    return None
+
+4. Session Security
+Implement CSRF protection
+Use secure cookies (httpOnly, secure, sameSite)
+Rotate refresh tokens periodically
+Monitor concurrent sessions
+Track device fingerprints
+5. Rate Limiting
+Backend should implement rate limiting since auth server doesn't:
+Login attempts: 5 per minute per IP
+Registration: 3 per hour per IP
+Password reset: 3 per hour per email
+Token refresh: 10 per minute per user
+
+Important Notes
+User ID Format: All user IDs are 10-character strings using Base32 Crockford alphabet (excludes 0, O, I, L, 1)
+
+
+Token Expiry:
+
+
+Access tokens: 15 minutes
+Refresh tokens: 7 days
+2FA sessions: 5 minutes
+Password Requirements:
+
+
+Minimum 12 characters
+Must contain: uppercase, lowercase, numbers, special characters
+Email Verification:
+
+
+6-digit numeric codes
+Valid for 24 hours
+Account Lockout:
+
+
+After 5 failed attempts
+Lockout duration: 30 minutes
+Database Schema:
+
+
+Users in public.users
+Credentials in auth.credentials
+Tokens in auth.refresh_tokens
+Audit logs in audit.logs
+
+Testing Examples
+Complete Login Flow
+# 1. Login
+curl -X POST http://10.0.0.3:8000/auth/login \
+  -H "X-API-Key: your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "TestPassword123!"
+  }'
+
+# 2. If 2FA required, verify code
+curl -X POST http://10.0.0.3:8000/auth/2fa/verify \
+  -H "X-API-Key: your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "session_from_login",
+    "code": "123456"
+  }'
+
+# 3. Validate token
+curl -X GET http://10.0.0.3:8000/auth/validate-token \
+  -H "X-API-Key: your_api_key" \
+  -H "Authorization: Bearer eyJhbGci..."
+
+# 4. Refresh token
+curl -X POST http://10.0.0.3:8000/auth/refresh \
+  -H "X-API-Key: your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "refresh_identifier",
+    "token": "actual_refresh_token"
+  }'
+
+
+Security Checklist for Backend
+[ ] Store INTERNAL_API_KEY securely (environment variable)
+[ ] Never expose auth server directly to internet
+[ ] Implement rate limiting on backend
+[ ] Use HTTPS for all external communications
+[ ] Validate and sanitize all inputs before forwarding
+[ ] Log all authentication events
+[ ] Monitor for suspicious patterns
+[ ] Implement CSRF protection
+[ ] Use secure session management
+[ ] Regular token rotation
+[ ] Implement proper error handling (don't leak sensitive info)
+[ ] Keep audit logs of admin actions
+
